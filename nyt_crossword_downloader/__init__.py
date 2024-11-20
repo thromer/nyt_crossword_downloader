@@ -9,10 +9,17 @@ import requests
 import os
 import json
 import re
+import sys
+
 from time import time, sleep
 from datetime import datetime, timedelta
 from dateutil.parser import parse as parse_dt_str
 from argparse import ArgumentParser
+
+
+def normalize_date_str(date_str):
+    (y, m, d) = date_str.split("-")
+    return "{:04d}-{:02d}-{:02d}".format(int(y), int(m), int(d))
 
 
 class MissingPuzzleData(Exception):
@@ -38,10 +45,23 @@ class CLIArgs:
             "--cookie_string", "-c", help="NYT-S=<cookie value>"
         )
         parser.add_argument(
-            "--date",
-            "-d",
+            "--start",
+            "-s",
             default=today,
-            help="Download a puzzle from a particular date.",
+            help="Download puzzles starting on date.",
+        )
+        parser.add_argument(
+            "--end",
+            "-e",
+            default=today,
+            help="Download puzzles ending on date.",
+        )
+        parser.add_argument(
+            "--interval_seconds",
+            "-i",
+            type=float,
+            default=30,
+            help="Delay between requests"
         )
         parser.add_argument(
             "--puzzle-id", "-p", type=int, help="Download a particular puzzle ID."
@@ -69,16 +89,16 @@ class Puzzle:
         except Exception:
             raise MissingPuzzleData("No data could be found for this puzzle!")
 
-    def get_puzzle_id_by_date(self, dt):
-        d = self.format_date(dt)
-        url = self.URL_RECENT_PUZZLES.format(date_start=d, date_end=d)
+    def get_puzzle_ids_by_dates(self, start_dt, end_dt):
+        sd = self.format_date(start_dt)
+        ed = self.format_date(end_dt)
+        url = self.URL_RECENT_PUZZLES.format(date_start=sd, date_end=ed)
         # print(url)
         resp = requests.get(url)
-        try:
-            resp_json = resp.json()
-            return self.get_results_from_json(resp_json)["puzzle_id"]
-        except Exception:
-            return None
+        result = {}
+        for r in resp.json()["results"]:
+            result[parse_dt_str(normalize_date_str(r["print_date"]))] = r["puzzle_id"]
+        return result
 
     def get_puzzle_date_str(self, data, day_only=False):
         if day_only:
@@ -87,11 +107,12 @@ class Puzzle:
 
     def get_puzzle_date(self, data, return_date_str=False):
         try:
-            # date_str = data["puzzle_meta"]["printDate"]
             date_str = data["publicationDate"]
         except KeyError:
             raise MissingPuzzleData("No data could be found for this puzzle!")
         else:
+            # Normalize since sometimes publicationDate is wonky (e.g. 1993-12-4)
+            date_str = normalize_date_str(date_str)
             if return_date_str:
                 return date_str
             return parse_dt_str(date_str)
@@ -105,7 +126,7 @@ class Puzzle:
         return "{:02d}".format(n)
 
     def get_puzzle_data_by_date(self, dt):
-        puzzle_id = self.get_puzzle_id_by_date(dt)
+        puzzle_id = self.get_puzzle_ids_by_dates(dt, dt)[dt]
         _, _, data = self.get_puzzle_data_by_id(puzzle_id)
         return puzzle_id, dt, data
 
@@ -115,6 +136,8 @@ class Puzzle:
         resp = requests.get(url, cookies=self.cookies.cookies)
         # print(resp.json())
         data = resp.json()  # self.get_results_from_json(resp.json())
+        # check that the board is there ...
+        _ = data["body"][0]["board"]
         return puzzle_id, self.get_puzzle_date(data), data
 
 
@@ -188,9 +211,25 @@ class RangeDownloader:
     def download_date_range(
         self, start_date, stop_date,
     ):
+        PAGE_SIZE = 100
         run_st = time()
         time_waiting = 0
-        date_list = self.make_date_range(start_date, stop_date)
+
+        ids = {}
+        # First let's get *all* the ids
+        current_date = start_date
+        while current_date <= stop_date:
+            query_st = time()
+            ids.update(self.puzzle.get_puzzle_ids_by_dates(current_date, min(stop_date, current_date + timedelta(days=PAGE_SIZE-1))))
+            current_date = current_date + timedelta(days=PAGE_SIZE)
+            query_elapsed = time() - query_st
+            time_remaining = self.secs_btwn_queries - query_elapsed
+            if time_remaining > 0:
+                time_waiting += time_remaining
+                # print(f"[ids] sleep {time_remaining}", file=sys.stderr)
+                sleep(time_remaining)
+
+        date_list = self.make_date_range(start_date, stop_date)  # WTF is this?
         for date in date_list:
             query_st = time()
             try:
@@ -198,7 +237,7 @@ class RangeDownloader:
                     puzzle_id,
                     puzzle_date,
                     puzzle_data,
-                ) = self.puzzle.get_puzzle_data_by_date(date)
+                ) = self.puzzle.get_puzzle_data_by_id(ids[date])
             except Exception:
                 pass
             else:
@@ -213,6 +252,7 @@ class RangeDownloader:
             time_remaining = self.secs_btwn_queries - query_elapsed
             if time_remaining > 0:
                 time_waiting += time_remaining
+                # print(f"sleep {time_remaining}", file=sys.stderr)
                 sleep(time_remaining)
         print(
             "Finished downloading date range in {:.02f} seconds.".format(
@@ -231,6 +271,12 @@ class RangeDownloader:
 
 def main():
     args = CLIArgs().parse()
+    r = RangeDownloader(args.destination, args.cookie_string, args.date_folders, args.interval_seconds)
+    r.download_date_range(
+        parse_dt_str(args.start),
+        parse_dt_str(args.end)
+    )
+    sys.exit(0)
     cookies = Cookies(args.cookie_string)
     puzzle = Puzzle(cookies)
     file_system = FileSystem(puzzle, args.destination, args.date_folders)
@@ -238,7 +284,7 @@ def main():
     try:
         if args.puzzle_id is None:
             puzzle_id, puzzle_date, puzzle_data = puzzle.get_puzzle_data_by_date(
-                parse_dt_str(args.date)
+                parse_dt_str(args.end)
             )
         else:
             puzzle_id, puzzle_date, puzzle_data = puzzle.get_puzzle_data_by_id(
