@@ -35,7 +35,7 @@ class CLIArgs:
             help="Folder where crossword data will be written. Default is current directory.",
         )
         parser.add_argument(
-            "--cookies", "-c", help="NYT cookies.txt file for authentication."
+            "--cookie_string", "-c", help="NYT-S=<cookie value>"
         )
         parser.add_argument(
             "--date",
@@ -55,9 +55,9 @@ class CLIArgs:
 
 
 class Puzzle:
-    URL_RECENT_PUZZLES = "https://nyt-games-prd.appspot.com/svc/crosswords/v3/36569100/puzzles.json?publish_type=daily&sort_order=asc&sort_by=print_date&date_start={date_start}&date_end={date_end}"
+    URL_RECENT_PUZZLES = "https://nytimes.com/svc/crosswords/v3/puzzles.json?publish_type=daily&sort_order=asc&sort_by=print_date&date_start={date_start}&date_end={date_end}"
     URL_PUZZLE_BY_ID = (
-        "https://www.nytimes.com/svc/crosswords/v2/puzzle/{puzzle_id}.json"
+        "https://www.nytimes.com/svc/crosswords/v6/puzzle/{puzzle_id}.json"
     )
 
     def __init__(self, cookies):
@@ -72,6 +72,7 @@ class Puzzle:
     def get_puzzle_id_by_date(self, dt):
         d = self.format_date(dt)
         url = self.URL_RECENT_PUZZLES.format(date_start=d, date_end=d)
+        # print(url)
         resp = requests.get(url)
         try:
             resp_json = resp.json()
@@ -86,7 +87,8 @@ class Puzzle:
 
     def get_puzzle_date(self, data, return_date_str=False):
         try:
-            date_str = data["puzzle_meta"]["printDate"]
+            # date_str = data["puzzle_meta"]["printDate"]
+            date_str = data["publicationDate"]
         except KeyError:
             raise MissingPuzzleData("No data could be found for this puzzle!")
         else:
@@ -109,35 +111,28 @@ class Puzzle:
 
     def get_puzzle_data_by_id(self, puzzle_id):
         url = self.URL_PUZZLE_BY_ID.format(puzzle_id=puzzle_id)
+        # print(url)
         resp = requests.get(url, cookies=self.cookies.cookies)
-        data = self.get_results_from_json(resp.json())
+        # print(resp.json())
+        data = resp.json()  # self.get_results_from_json(resp.json())
         return puzzle_id, self.get_puzzle_date(data), data
 
 
 class Cookies:
-    def __init__(self, cookie_file):
-        self.cookie_file = cookie_file
+    def __init__(self, cookie_string):
+        self.cookie_string = cookie_string
 
     @property
     def cookies(self):
-        return self.parse(self.cookie_file)
+        return self.parse(self.cookie_string)
 
-    def parse(self, cookie_file):
-        """Load and parse a cookies.txt file into a dict.
-
-        Parse a cookies.txt file and return a dictionary of key value pairs
-        compatible with requests.
-
-        See: https://stackoverflow.com/a/54659484/5161222
-        """
+    def parse(self, cookie_string):
+        """Load and parse cookie=value file into a dict."""
         cookies = {}
-        if cookie_file is None:
+        if cookie_string is None:
             return cookies
-        with open(cookie_file, "r") as fd:
-            for line in fd:
-                if not re.match(r"^\#", line):
-                    line_fields = line.strip().split("\t")
-                    cookies[line_fields[5]] = line_fields[6]
+        k, v = cookie_string.split('=', 1)
+        cookies[k] = v
         return cookies
 
 
@@ -175,13 +170,13 @@ class FileSystem:
 
 class RangeDownloader:
     def __init__(
-        self, destination=".", cookie_file=None, date_folders=False, secs_btwn_queries=0
+        self, destination=".", cookie_string=None, date_folders=False, secs_btwn_queries=0
     ):
         self.destination = destination
-        self.cookie_file = cookie_file
+        self.cookie_string = cookie_string
         self.date_folders = date_folders
         self.secs_btwn_queries = secs_btwn_queries
-        self.puzzle = Puzzle(Cookies(self.cookie_file))
+        self.puzzle = Puzzle(Cookies(self.cookie_string))
         self.fs = FileSystem(self.puzzle, self.destination, date_folders)
 
     def make_date_range(self, start_date, stop_date):
@@ -230,13 +225,13 @@ class RangeDownloader:
             )
         )
 
-    def download_id_range(self, start_id, stop_id, cookie_file=None):
+    def download_id_range(self, start_id, stop_id, cookie_string=None):
         raise NotImplementedError
 
 
 def main():
     args = CLIArgs().parse()
-    cookies = Cookies(args.cookies)
+    cookies = Cookies(args.cookie_string)
     puzzle = Puzzle(cookies)
     file_system = FileSystem(puzzle, args.destination, args.date_folders)
 
